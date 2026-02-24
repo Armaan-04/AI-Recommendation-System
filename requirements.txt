@@ -3,6 +3,7 @@ altair<5
 requests
 pandas
 scikit-learn
+sentence-transformers
 
 
 
