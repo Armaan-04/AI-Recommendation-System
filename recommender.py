@@ -5,72 +5,79 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+TMDB_BASE_URL = "https://api.themoviedb.org/3"
+
+# Read token from environment or Streamlit secrets
 TMDB_READ_TOKEN = os.getenv("TMDB_READ_TOKEN")
 
-if not TMDB_READ_TOKEN:
-    raise RuntimeError("TMDB_READ_TOKEN not set. Add it in Streamlit Secrets.")
-
-TMDB_BASE_URL = "https://api.themoviedb.org/3"
+if TMDB_READ_TOKEN is None:
+    raise RuntimeError("TMDB_READ_TOKEN not found. Add it to Streamlit secrets or environment variables.")
 
 HEADERS = {
     "Authorization": f"Bearer {TMDB_READ_TOKEN}",
     "accept": "application/json"
 }
 
+@staticmethod
+def _tmdb_get(url, params=None):
+    res = requests.get(url, headers=HEADERS, params=params)
+    res.raise_for_status()
+    return res.json()
+
 def fetch_movies_2020_2025(pages=5):
-    movies = []
+    all_movies = []
 
     for page in range(1, pages + 1):
-        url = f"{TMDB_BASE_URL}/discover/movie"
-        params = {
-            "sort_by": "vote_average.desc",
-            "vote_count.gte": 500,
-            "primary_release_date.gte": "2020-01-01",
-            "primary_release_date.lte": "2025-12-31",
-            "language": "en-US",
-            "page": page
-        }
+        data = _tmdb_get(
+            f"{TMDB_BASE_URL}/discover/movie",
+            params={
+                "sort_by": "vote_average.desc",
+                "vote_count.gte": 300,
+                "primary_release_date.gte": "2020-01-01",
+                "primary_release_date.lte": "2025-12-31",
+                "page": page,
+                "language": "en-US"
+            }
+        )
 
-        res = requests.get(url, headers=HEADERS, params=params)
-        res.raise_for_status()
-        data = res.json()["results"]
-
-        for m in data:
-            movies.append({
+        for m in data["results"]:
+            all_movies.append({
                 "title": m["title"],
-                "overview": m["overview"],
+                "overview": m["overview"] or "",
                 "rating": m["vote_average"],
-                "release_date": m["release_date"]
+                "genre_ids": m["genre_ids"]
             })
 
-    return pd.DataFrame(movies)
+    return pd.DataFrame(all_movies)
 
+def fetch_genre_map():
+    data = _tmdb_get(f"{TMDB_BASE_URL}/genre/movie/list")
+    return {g["id"]: g["name"] for g in data["genres"]}
 
 def build_similarity_model(df):
     model = SentenceTransformer("all-MiniLM-L6-v2")
-    embeddings = model.encode(df["overview"].fillna("").tolist(), show_progress_bar=True)
-    similarity_matrix = cosine_similarity(embeddings)
-    return similarity_matrix
+    embeddings = model.encode(df["overview"].tolist(), show_progress_bar=True)
+    return model, embeddings
 
+def recommend_similar_movies(input_title, df, embeddings, genre_map, top_n=5):
+    if input_title not in df["title"].values:
+        return []
 
-def recommend_similar_movies(title, df, sim_matrix, top_n=5):
-    if title not in df["title"].values:
-        return pd.DataFrame()
+    idx = df.index[df["title"] == input_title][0]
+    input_genres = set(df.iloc[idx]["genre_ids"])
 
-    idx = df.index[df["title"] == title][0]
-    scores = list(enumerate(sim_matrix[idx]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)[1:top_n + 1]
+    # 🔥 GENRE FILTERING FIRST
+    filtered_df = df[df["genre_ids"].apply(lambda gids: len(set(gids) & input_genres) > 0)].reset_index(drop=True)
+    filtered_embeddings = embeddings[filtered_df.index]
 
-    results = []
-    for i, score in scores:
-        results.append({
-            "Title": df.iloc[i]["title"],
-            "Rating": df.iloc[i]["rating"],
-            "Release Date": df.iloc[i]["release_date"],
-            "Similarity": round(score, 3)
-        })
+    input_embedding = embeddings[idx].reshape(1, -1)
+    sims = cosine_similarity(input_embedding, filtered_embeddings)[0]
 
-    return pd.DataFrame(results)
+    filtered_df["similarity"] = sims
+    filtered_df = filtered_df.sort_values(by=["similarity", "rating"], ascending=False)
 
+    results = filtered_df[filtered_df["title"] != input_title].head(top_n)
 
+    results["genres"] = results["genre_ids"].apply(lambda gids: ", ".join([genre_map[g] for g in gids if g in genre_map]))
 
+    return results[["title", "rating", "genres"]]
