@@ -2,40 +2,32 @@ import os
 import requests
 import pandas as pd
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+import streamlit as st
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 
-# Get token from Streamlit secrets or environment
-def get_tmdb_token():
-    try:
-        import streamlit as st
-        return st.secrets["TMDB_READ_TOKEN"]
-    except Exception:
-        token = os.getenv("TMDB_READ_TOKEN")
-        if not token:
-            raise RuntimeError("TMDB_READ_TOKEN not found. Add it to Streamlit secrets or environment variables.")
-        return token
+def get_tmdb_headers():
+    token = st.secrets.get("TMDB_READ_TOKEN", None)
+    if not token:
+        raise RuntimeError("TMDB_READ_TOKEN not found in Streamlit secrets.")
+    return {
+        "Authorization": f"Bearer {token}",
+        "accept": "application/json"
+    }
 
-TMDB_READ_TOKEN = get_tmdb_token()
-
-HEADERS = {
-    "Authorization": f"Bearer {TMDB_READ_TOKEN}",
-    "accept": "application/json"
-}
-
-# Fetch genre map
 def fetch_genre_map():
-    url = f"{TMDB_BASE_URL}/genre/movie/list?language=en-US"
-    res = requests.get(url, headers=HEADERS)
+    url = f"{TMDB_BASE_URL}/genre/movie/list"
+    res = requests.get(url, headers=get_tmdb_headers())
     res.raise_for_status()
     data = res.json()["genres"]
     return {g["id"]: g["name"] for g in data}
 
-# Fetch movies from 2000–2025
 def fetch_movies_2000_2025(pages=5):
+    genre_map = fetch_genre_map()
     all_movies = []
+
     for page in range(1, pages + 1):
         url = f"{TMDB_BASE_URL}/discover/movie"
         params = {
@@ -46,66 +38,50 @@ def fetch_movies_2000_2025(pages=5):
             "language": "en-US",
             "page": page
         }
-        res = requests.get(url, headers=HEADERS, params=params)
+        res = requests.get(url, headers=get_tmdb_headers(), params=params)
         res.raise_for_status()
-        all_movies.extend(res.json()["results"])
+
+        for m in res.json()["results"]:
+            all_movies.append({
+                "title": m.get("title", ""),
+                "overview": m.get("overview", ""),
+                "year": m.get("release_date", "")[:4],
+                "rating": m.get("vote_average", 0),
+                "genres_text": ", ".join([genre_map.get(gid, "") for gid in m.get("genre_ids", [])])
+            })
 
     df = pd.DataFrame(all_movies)
+    df = df.drop_duplicates(subset=["title"]).reset_index(drop=True)
     return df
 
-# Build AI similarity model
 def build_similarity_model(df):
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    df["overview"] = df["overview"].fillna("")
+    df["genres_text"] = df["genres_text"].fillna("")
 
-    # Make content richer
     df["content"] = (
-        df["title"].fillna("") + " " +
-        df["overview"].fillna("") + " " +
-        df["genres_text"].fillna("") * 3  # boost genre importance
+        df["title"] + " " +
+        df["overview"] + " " +
+        (df["genres_text"] + " ") * 3  # boost genre importance
     )
 
+    model = SentenceTransformer("all-MiniLM-L6-v2")
     embeddings = model.encode(df["content"].tolist(), show_progress_bar=True)
-    sim_matrix = cosine_similarity(embeddings, embeddings)
 
-    return sim_matrix
+    return embeddings
 
-# Recommend similar movies
-def recommend_similar_movies(title, df, sim_matrix, top_n=10, selected_genres=None):
-    if title not in df["title"].values:
-        return []
+def recommend_similar_movies(movie_title, df, embeddings, selected_genres=None, top_n=10):
+    if movie_title not in df["title"].values:
+        return pd.DataFrame()
 
-    idx = df.index[df["title"] == title][0]
-    scores = list(enumerate(sim_matrix[idx]))
+    idx = df.index[df["title"] == movie_title][0]
+    sim_scores = cosine_similarity([embeddings[idx]], embeddings)[0]
 
-    # Remove itself
-    scores = scores[1:]
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
+    df_scores = df.copy()
+    df_scores["score"] = sim_scores
 
-    results = []
-    for i, score in scores:
-        movie = df.iloc[i]
+    if selected_genres:
+        mask = df_scores["genres_text"].str.contains("|".join(selected_genres), case=False, na=False)
+        df_scores = df_scores[mask]
 
-        # Genre filter
-        if selected_genres:
-            movie_genres = set(movie["genres_text"].split(", "))
-            if not movie_genres.intersection(set(selected_genres)):
-                continue
-
-        hybrid_score = (
-            0.6 * score +
-            0.3 * (movie["vote_average"] / 10) +
-            0.1 * (min(movie["vote_count"], 5000) / 5000)
-        )
-
-        results.append({
-            "title": movie["title"],
-            "rating": movie["vote_average"],
-            "genres": movie["genres_text"],
-            "overview": movie["overview"],
-            "score": round(hybrid_score, 3)
-        })
-
-        if len(results) >= top_n:
-            break
-
-    return results
+    df_scores = df_scores.sort_values("score", ascending=False)
+    return df_scores.iloc[1: top_n + 1][["title", "year", "rating", "genres_text"]]
