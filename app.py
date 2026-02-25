@@ -3,37 +3,31 @@ from recommender import fetch_movies_2020_2025, build_similarity_model, recommen
 
 st.set_page_config(page_title="🎬 AI Movie Recommender", layout="wide")
 st.title("🎬 AI-Powered Movie Recommendation System (2020–2025)")
-st.write("Select a movie and get semantically similar recommendations using AI embeddings.")
 
 @st.cache_data
 def load_data():
     return fetch_movies_2020_2025(pages=5)
 
 @st.cache_resource
-def build_model(df):
+def load_model(df):
     return build_similarity_model(df)
 
-with st.spinner("Loading movies..."):
+with st.spinner("Loading movies from TMDB..."):
     df = load_data()
 
-with st.spinner("Building AI similarity model... (first run may take a minute)"):
-    sim_matrix = build_model(df)
+with st.spinner("Building AI similarity model..."):
+    sim_matrix = load_model(df)
 
-movie_list = df["title"].sort_values().tolist()
-selected_movie = st.selectbox("🎥 Select a movie", movie_list)
+movie_list = sorted(df["title"].unique().tolist())
 
-if st.button("Recommend 🎯"):
-    recs = recommend_similar_movies(selected_movie, df, sim_matrix, top_n=10)
+selected_movie = st.selectbox("🎥 Select a movie you liked:", movie_list)
 
-    if len(recs) == 0:
-        st.warning("Movie not found.")
+if st.button("Recommend Similar Movies"):
+    recommendations = recommend_similar_movies(selected_movie, df, sim_matrix)
+
+    if recommendations.empty:
+        st.warning("Movie not found in dataset.")
     else:
-        st.subheader("✨ Recommended Movies")
-        for _, row in recs.iterrows():
-            st.markdown(
-                f"**{row['title']}**  \n"
-                f"📅 {row['release_date']} | ⭐ {row['vote_average']}"
-            )
-
-
+        st.subheader("🍿 Recommended Movies")
+        st.dataframe(recommendations, use_container_width=True)
         
