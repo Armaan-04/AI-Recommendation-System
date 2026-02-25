@@ -1,31 +1,44 @@
 import streamlit as st
 from recommender import fetch_movies_2000_2025, build_similarity_model, recommend_similar_movies
 
-st.set_page_config(page_title="🎬 AI Movie Recommender", layout="centered")
-st.title("🎬 AI-Powered Movie Recommendation System (2000–2025)")
+st.set_page_config(page_title="🎬 AI Movie Recommender", layout="wide")
 
-@st.cache_data
+st.title("🎬 AI-Powered Movie Recommendation System (2000–2025)")
+st.caption("Content-based AI recommendations using embeddings + cosine similarity")
+
+@st.cache_data(show_spinner=True)
 def load_data():
     return fetch_movies_2000_2025(pages=5)
 
+@st.cache_resource(show_spinner=True)
+def load_model(df):
+    return build_similarity_model(df)
+
 df = load_data()
-sim_matrix = build_similarity_model(df)
+model, embeddings = load_model(df)
 
-genres = sorted({g for sublist in df["genres"] for g in sublist if g})
-selected_genre = st.selectbox("Filter by Genre (optional)", ["All"] + genres)
+movie_list = sorted(df["title"].tolist())
+genre_list = sorted({g for sub in df["genres"] for g in sub})
 
-movie = st.selectbox("Choose a movie you like:", sorted(df["title"].tolist()))
+col1, col2 = st.columns(2)
 
-if st.button("Recommend"):
-    genre_filter = None if selected_genre == "All" else selected_genre
-    recs = recommend_similar_movies(movie, df, sim_matrix, top_n=6, genre_filter=genre_filter)
+with col1:
+    selected_movie = st.selectbox("🎥 Select a movie", movie_list)
 
-    if recs.empty:
-        st.warning("No recommendations found. Try another movie or genre.")
+with col2:
+    selected_genres = st.multiselect("🎭 Filter by genres (optional)", genre_list, default=["Action"] if "Action" in genre_list else [])
+
+if st.button("✨ Recommend Similar Movies"):
+    results = recommend_similar_movies(selected_movie, df, embeddings, selected_genres)
+
+    if results.empty:
+        st.warning("No similar movies found. Try changing genre filters.")
     else:
-        st.subheader("Recommended Movies")
-        for _, row in recs.iterrows():
-            st.markdown(f"**🎥 {row['title']} ({row['year']})**")
-            st.caption(f"⭐ Rating: {row['rating']:.1f}")
-            st.markdown(f"<small>{row['overview']}</small>", unsafe_allow_html=True)
-            st.markdown("---")
+        st.subheader("🔥 Recommended Movies")
+        for _, row in results.iterrows():
+            st.markdown(f"""
+**🎬 {row['title']} ({row['year']})**  
+⭐ Rating: {row['rating']}  
+🎭 Genres: {', '.join(row['genres'])}  
+---
+""")
