@@ -7,77 +7,105 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 
-# Read token from environment or Streamlit secrets
-TMDB_READ_TOKEN = os.getenv("TMDB_READ_TOKEN")
+# Get token from Streamlit secrets or environment
+def get_tmdb_token():
+    try:
+        import streamlit as st
+        return st.secrets["TMDB_READ_TOKEN"]
+    except Exception:
+        token = os.getenv("TMDB_READ_TOKEN")
+        if not token:
+            raise RuntimeError("TMDB_READ_TOKEN not found. Add it to Streamlit secrets or environment variables.")
+        return token
 
-if TMDB_READ_TOKEN is None:
-    raise RuntimeError("TMDB_READ_TOKEN not found. Add it to Streamlit secrets or environment variables.")
+TMDB_READ_TOKEN = get_tmdb_token()
 
 HEADERS = {
     "Authorization": f"Bearer {TMDB_READ_TOKEN}",
     "accept": "application/json"
 }
 
-@staticmethod
-def _tmdb_get(url, params=None):
-    res = requests.get(url, headers=HEADERS, params=params)
-    res.raise_for_status()
-    return res.json()
-
-def fetch_movies_2020_2025(pages=5):
-    all_movies = []
-
-    for page in range(1, pages + 1):
-        data = _tmdb_get(
-            f"{TMDB_BASE_URL}/discover/movie",
-            params={
-                "sort_by": "vote_average.desc",
-                "vote_count.gte": 300,
-                "primary_release_date.gte": "2020-01-01",
-                "primary_release_date.lte": "2025-12-31",
-                "page": page,
-                "language": "en-US"
-            }
-        )
-
-        for m in data["results"]:
-            all_movies.append({
-                "title": m["title"],
-                "overview": m["overview"] or "",
-                "rating": m["vote_average"],
-                "genre_ids": m["genre_ids"]
-            })
-
-    return pd.DataFrame(all_movies)
-
+# Fetch genre map
 def fetch_genre_map():
-    data = _tmdb_get(f"{TMDB_BASE_URL}/genre/movie/list")
-    return {g["id"]: g["name"] for g in data["genres"]}
+    url = f"{TMDB_BASE_URL}/genre/movie/list?language=en-US"
+    res = requests.get(url, headers=HEADERS)
+    res.raise_for_status()
+    data = res.json()["genres"]
+    return {g["id"]: g["name"] for g in data}
 
+# Fetch movies from 2000–2025
+def fetch_movies_2000_2025(pages=5):
+    all_movies = []
+    for page in range(1, pages + 1):
+        url = f"{TMDB_BASE_URL}/discover/movie"
+        params = {
+            "sort_by": "vote_average.desc",
+            "vote_count.gte": 300,
+            "primary_release_date.gte": "2000-01-01",
+            "primary_release_date.lte": "2025-12-31",
+            "language": "en-US",
+            "page": page
+        }
+        res = requests.get(url, headers=HEADERS, params=params)
+        res.raise_for_status()
+        all_movies.extend(res.json()["results"])
+
+    df = pd.DataFrame(all_movies)
+    return df
+
+# Build AI similarity model
 def build_similarity_model(df):
     model = SentenceTransformer("all-MiniLM-L6-v2")
-    embeddings = model.encode(df["overview"].tolist(), show_progress_bar=True)
-    return model, embeddings
 
-def recommend_similar_movies(input_title, df, embeddings, genre_map, top_n=5):
-    if input_title not in df["title"].values:
+    # Make content richer
+    df["content"] = (
+        df["title"].fillna("") + " " +
+        df["overview"].fillna("") + " " +
+        df["genres_text"].fillna("") * 3  # boost genre importance
+    )
+
+    embeddings = model.encode(df["content"].tolist(), show_progress_bar=True)
+    sim_matrix = cosine_similarity(embeddings, embeddings)
+
+    return sim_matrix
+
+# Recommend similar movies
+def recommend_similar_movies(title, df, sim_matrix, top_n=10, selected_genres=None):
+    if title not in df["title"].values:
         return []
 
-    idx = df.index[df["title"] == input_title][0]
-    input_genres = set(df.iloc[idx]["genre_ids"])
+    idx = df.index[df["title"] == title][0]
+    scores = list(enumerate(sim_matrix[idx]))
 
-    # 🔥 GENRE FILTERING FIRST
-    filtered_df = df[df["genre_ids"].apply(lambda gids: len(set(gids) & input_genres) > 0)].reset_index(drop=True)
-    filtered_embeddings = embeddings[filtered_df.index]
+    # Remove itself
+    scores = scores[1:]
+    scores = sorted(scores, key=lambda x: x[1], reverse=True)
 
-    input_embedding = embeddings[idx].reshape(1, -1)
-    sims = cosine_similarity(input_embedding, filtered_embeddings)[0]
+    results = []
+    for i, score in scores:
+        movie = df.iloc[i]
 
-    filtered_df["similarity"] = sims
-    filtered_df = filtered_df.sort_values(by=["similarity", "rating"], ascending=False)
+        # Genre filter
+        if selected_genres:
+            movie_genres = set(movie["genres_text"].split(", "))
+            if not movie_genres.intersection(set(selected_genres)):
+                continue
 
-    results = filtered_df[filtered_df["title"] != input_title].head(top_n)
+        hybrid_score = (
+            0.6 * score +
+            0.3 * (movie["vote_average"] / 10) +
+            0.1 * (min(movie["vote_count"], 5000) / 5000)
+        )
 
-    results["genres"] = results["genre_ids"].apply(lambda gids: ", ".join([genre_map[g] for g in gids if g in genre_map]))
+        results.append({
+            "title": movie["title"],
+            "rating": movie["vote_average"],
+            "genres": movie["genres_text"],
+            "overview": movie["overview"],
+            "score": round(hybrid_score, 3)
+        })
 
-    return results[["title", "rating", "genres"]]
+        if len(results) >= top_n:
+            break
+
+    return results

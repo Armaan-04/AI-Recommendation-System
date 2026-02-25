@@ -1,39 +1,49 @@
 import streamlit as st
-from recommender import fetch_movies_2020_2025, fetch_genre_map, build_similarity_model, recommend_similar_movies
+from recommender import fetch_movies_2000_2025, fetch_genre_map, build_similarity_model, recommend_similar_movies
 
 st.set_page_config(page_title="🎬 AI Movie Recommender", layout="wide")
-st.title("🎬 AI-Powered Movie Recommendation System (2020–2025)")
+st.title("🎬 AI-Powered Movie Recommendation System (2000–2025)")
 
-@st.cache_data(show_spinner=True)
+@st.cache_data
 def load_data():
-    df = fetch_movies_2020_2025(pages=5)
+    df = fetch_movies_2000_2025(pages=5)
     genre_map = fetch_genre_map()
-    return df, genre_map
 
-@st.cache_resource(show_spinner=True)
-def load_model(df):
-    model, embeddings = build_similarity_model(df)
-    return embeddings
+    df["genres_text"] = df["genre_ids"].apply(
+        lambda ids: ", ".join([genre_map.get(i, "Unknown") for i in ids])
+    )
+    return df
 
-with st.spinner("Fetching movies from TMDB..."):
-    df, genre_map = load_data()
+@st.cache_resource
+def build_model(df):
+    return build_similarity_model(df)
 
-with st.spinner("Building AI similarity model..."):
-    embeddings = load_model(df)
+df = load_data()
+sim_matrix = build_model(df)
 
-movie_list = sorted(df["title"].tolist())
-selected_movie = st.selectbox("🎥 Select a movie you like:", movie_list)
+movie_list = sorted(df["title"].dropna().unique().tolist())
+selected_movie = st.selectbox("🎥 Select a movie:", movie_list)
 
-if st.button("🔮 Recommend Similar Movies"):
-    recommendations = recommend_similar_movies(selected_movie, df, embeddings, genre_map, top_n=6)
+all_genres = sorted({g for gs in df["genres_text"] for g in gs.split(", ") if g})
+selected_genres = st.multiselect("🎭 Filter by genres (optional):", all_genres)
 
-    if len(recommendations) == 0:
-        st.warning("No similar movies found.")
+if st.button("🔥 Recommend"):
+    results = recommend_similar_movies(
+        selected_movie, df, sim_matrix, top_n=10, selected_genres=selected_genres
+    )
+
+    if results:
+        st.subheader("✨ Recommended Movies")
+        for r in results:
+            st.markdown(f"""
+**🎬 {r['title']}**  
+⭐ Rating: {r['rating']}  
+🎭 Genres: {r['genres']}  
+🧠 Match Score: {r['score']}  
+
+_{r['overview']}_  
+---
+""")
     else:
-        st.subheader("✨ You may also like:")
-        for _, row in recommendations.iterrows():
-            st.markdown(f"**🎬 {row['title']}**")
-            st.write(f"⭐ Rating: {row['rating']}")
-            st.write(f"🎭 Genres: {row['genres']}")
-            st.markdown("---")
+        st.warning("No good matches found. Try changing genres.")
         
