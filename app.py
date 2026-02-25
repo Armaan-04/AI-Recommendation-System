@@ -1,118 +1,95 @@
 import streamlit as st
-from recommender import fetch_movies_2000_2025, fetch_genre_map, build_similarity_model, recommend_similar_movies
-
-st.set_page_config(
-    page_title="🎬 AI Movie Recommender",
-    page_icon="🎬",
-    layout="wide"
+from recommender import (
+    fetch_movies_2000_2025,
+    fetch_genre_map,
+    build_similarity_model,
+    recommend_similar_movies
 )
 
-# ---------- Custom CSS ----------
+st.set_page_config(page_title="🎬 AI Movie Recommender", layout="wide")
+
 st.markdown("""
 <style>
-.movie-card {
-    background: #0f1117;
-    border-radius: 12px;
-    padding: 16px;
-    margin-bottom: 16px;
-    border: 1px solid #222;
-}
 .movie-title {
-    font-size: 20px;
-    font-weight: 700;
-    margin-bottom: 4px;
+    font-size: 18px;
+    font-weight: 600;
 }
 .movie-meta {
     font-size: 13px;
-    color: #aaa;
-    margin-bottom: 8px;
+    color: #888;
 }
 .movie-overview {
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1.5;
-    color: #ddd;
 }
-.badge {
-    display: inline-block;
-    background: #1f2933;
-    color: #9ca3af;
-    padding: 4px 8px;
-    border-radius: 6px;
-    font-size: 11px;
-    margin-right: 6px;
-}
-.poster {
-    border-radius: 10px;
-    width: 100%;
+.block {
+    padding: 12px;
+    border-radius: 12px;
+    background: #111;
+    margin-bottom: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎬 AI Movie Recommendation System")
-st.caption("Smarter recommendations using semantic AI embeddings (2000–2025)")
+st.title("🎬 AI-Powered Movie Recommendation System")
+st.caption("Content-based recommendations using AI embeddings (2000–2025)")
 
-# ---------- Data ----------
-@st.cache_data
+@st.cache_data(show_spinner="Fetching movies from TMDB...")
 def load_data():
-    df = fetch_movies_2000_2025(pages=5)
-    genre_map = fetch_genre_map()
-    df["genres_text"] = df["genre_ids"].apply(
-        lambda ids: ", ".join([genre_map.get(i, "Unknown") for i in ids])
-    )
-    return df
+    return fetch_movies_2000_2025(pages=8)
 
-@st.cache_resource
-def build_model(df):
+@st.cache_resource(show_spinner="Building AI similarity model...")
+def load_model(df):
     return build_similarity_model(df)
 
+# Load data
 df = load_data()
-sim_matrix = build_model(df)
+model = load_model(df)
 
-# ---------- Sidebar Controls ----------
-with st.sidebar:
-    st.header("🎯 Filters")
-    movie_list = sorted(df["title"].dropna().unique().tolist())
-    selected_movie = st.selectbox("Select a movie", movie_list)
+# Genre map (ensures Action always appears)
+genre_map = fetch_genre_map()
+all_genres = ["All"] + sorted(genre_map.values())
 
-    all_genres = sorted({g for gs in df["genres_text"] for g in gs.split(", ") if g})
-    selected_genres = st.multiselect("Filter by genres (optional)", all_genres)
+# UI controls
+col1, col2 = st.columns([2, 1])
 
-    recommend_btn = st.button("🔥 Recommend")
-
-# ---------- Main Results ----------
-if recommend_btn:
-    results = recommend_similar_movies(
-        selected_movie, df, sim_matrix, top_n=10, selected_genres=selected_genres
+with col1:
+    movie_title = st.selectbox(
+        "🎥 Select a movie you like",
+        options=sorted(df["title"].dropna().unique().tolist())
     )
 
-    st.subheader("✨ Recommended Movies")
+with col2:
+    selected_genre = st.selectbox(
+        "🎭 Filter by genre (optional)",
+        options=all_genres
+    )
 
-    for r in results:
-        col1, col2 = st.columns([1, 3])
+if st.button("✨ Recommend Movies"):
+    with st.spinner("Finding similar movies..."):
+        genre_filter = None if selected_genre == "All" else selected_genre
+        recs = recommend_similar_movies(
+            movie_title,
+            df,
+            model,
+            genre_filter=genre_filter,
+            top_n=10
+        )
 
-        with col1:
-            poster_url = f"https://image.tmdb.org/t/p/w500{r.get('poster_path', '')}"
-            if r.get("poster_path"):
-                st.image(poster_url, use_container_width=True)
-            else:
-                st.image("https://via.placeholder.com/300x450?text=No+Poster", use_container_width=True)
+    if not recs:
+        st.warning("No similar movies found. Try another movie or remove the genre filter.")
+    else:
+        st.subheader("🍿 Recommended for you")
 
-        with col2:
+        for i, row in enumerate(recs, start=1):
             st.markdown(f"""
-<div class="movie-card">
-    <div class="movie-title">{r['title']}</div>
-    <div class="movie-meta">
-        ⭐ {r['rating']} &nbsp; • &nbsp; 🧠 Match: {r['score']}
-    </div>
-    <div class="movie-meta">
-        {''.join([f"<span class='badge'>{g}</span>" for g in r['genres'].split(", ")])}
-    </div>
-    <div class="movie-overview">
-        {r['overview']}
-    </div>
-</div>
-""", unsafe_allow_html=True)
+            <div class="block">
+                <div class="movie-title">{i}. {row['title']} ({int(row.get('year', 0))})</div>
+                <div class="movie-meta">⭐ Rating: {row.get('rating', 'N/A')} | 🎭 Genres: {row.get('genres_text', 'N/A')}</div>
+                <div class="movie-overview">{row.get('overview', 'No description available.')}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-else:
-    st.info("👈 Select a movie and click Recommend to get AI-powered suggestions.")
+st.markdown("---")
+st.caption("Built with ❤️ using Streamlit + AI Embeddings")
         
